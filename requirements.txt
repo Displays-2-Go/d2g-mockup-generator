@@ -1,0 +1,6 @@
+flask
+waitress
+psd-tools
+opencv-python-headless
+numpy
+Pillow

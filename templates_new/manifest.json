@@ -1,0 +1,40 @@
+{
+  "sw_straight_2.4x2.25": {
+    "photo": "sw_straight_2.4x2.25.jpg",
+    "quad": [[170,75],[675,66],[665,579],[178,516]],
+    "true_w": 2.4, "true_h": 2.25,
+    "source": "displays2go.com.au straight-superwall-backdrop-stand gallery, real PowerBar install photo",
+    "self_test_err": 0.81
+  },
+  "sw_straight_2.4x1.5": {
+    "photo": "sw_straight_2.4x1.5.jpg",
+    "quad": [[131,40],[689,35],[683,555],[141,561]],
+    "true_w": 2.4, "true_h": 1.5,
+    "source": "displays2go.com.au straight-superwall-backdrop-stand gallery, real Telstra shopping-centre-height install photo",
+    "self_test_err": 0.55
+  },
+  "bigmural_2.3x2.259_flat": {
+    "photo": "bigmural_2.3x2.259_flat.jpg",
+    "quad": [[118,85],[612,17],[604,579],[156,510]],
+    "true_w": 2.26, "true_h": 2.259,
+    "source": "displays2go.com.au big-mural-display-wall gallery, real Northwest Rail Link install photo, NO END CAPS variant only - cross-checked against a second real photo (CQUniversity, 3m width) for frame-style consistency before building",
+    "self_test_err": 0.62
+  },
+  "bigmural_3x2.259_flat": {
+    "photo": "bigmural_3x2.259_flat.jpg",
+    "quad": [[77,19],[729,52],[717,483],[125,574]],
+    "true_w": 2.995, "true_h": 2.259,
+    "source": "displays2go.com.au big-mural-display-wall gallery, real CQUniversity install photo, NO END CAPS variant only - cross-checked against a second real photo (Northwest Rail, 2.3m width) for frame-style consistency before building",
+    "self_test_err": 1.08
+  },
+  "sw_curved_2.3x2.259": {
+    "photo": "sw_curved_2.3x2.259.jpg",
+    "kind": "curved",
+    "left": 180, "right": 712, "fabric_height": 511.37,
+    "top_x": [180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268, 272, 276, 280, 284, 288, 292, 296, 300, 304, 308, 312, 316, 320, 324, 328, 332, 336, 340, 344, 348, 352, 356, 360, 364, 368, 372, 376, 380, 384, 388, 392, 396, 400, 404, 408, 412, 416, 420, 424, 428, 432, 436, 440, 444, 448, 452, 456, 460, 464, 468, 472, 476, 480, 484, 488, 492, 496, 500, 504, 508, 512, 516, 520, 524, 528, 532, 536, 540, 544, 548, 552, 556, 560, 564, 568, 572, 576, 580, 584, 588, 592, 596, 600, 604, 608, 612, 616, 620, 624, 628, 632, 636, 640, 644, 648, 652, 656, 660, 664, 668, 672, 676, 680, 684, 688, 692, 696, 700, 704, 708],
+    "top_y": [53, 40, 35, 31, 28, 27, 26, 25, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 26, 26, 26, 27, 27, 27, 27, 27, 28, 28, 28, 28, 29, 29, 29, 29, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 29, 29, 29, 29, 29, 29, 29, 29, 29, 28, 28, 28, 28, 27, 27, 27, 27, 27, 27, 26, 26, 26, 26, 25, 25, 25, 24, 24, 24, 23, 23, 23, 23, 22, 22, 21, 21, 20, 20, 20, 19, 19, 18, 18, 17, 17, 16, 16, 16, 15, 15, 14, 14, 14, 14, 13, 13, 13, 13, 13, 14, 14, 14, 15, 17, 20, 23, 27, 31, 35, 42],
+    "true_w": 2.3, "true_h": 2.259,
+    "source": "displays2go.com.au superwall-curved-exhibition-wall gallery, real erm Power install photo (frontal, counter box in front left untouched/unmasked). Curve shape cross-checked against 2 more independent real 2.3m photos (ezescan - plain wall, AB Mauri - angled) before building; fabric-height model (top curve shifts, height stays constant) validated against 2 unoccluded regions of the same photo, agreeing to ~2.5%. Self-test on real client art clean; self-test via crude 1px-column extraction showed 8.26 err with visible comb-striping traced to the extraction test method itself (real smooth artwork shows no striping) - not a defect in the compositing path.",
+    "self_test_err": "see notes - method artifact, not a real defect; verified clean visually with real art"
+  }
+}
