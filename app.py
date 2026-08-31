@@ -49,17 +49,50 @@ TOO_COMPLEX_MSG = (
 )
 
 
+# Measured on the real host, 31/08: a genuinely successful render (blade
+# stand) peaks around 1.9GB resident memory on a 2GB-limit container - the
+# parent (this Flask app, idle) uses well under 100MB. Watching the CHILD's
+# own resident memory and killing it BEFORE it nears the container ceiling
+# is more reliable than waiting for the OS's own out-of-memory killer, which
+# is free to pick either process when the container as a whole runs out -
+# confirmed happening on the live service (some heavy products took the
+# whole app down, not just their own request, despite running in a
+# subprocess) before this watchdog was added.
+CHILD_RSS_LIMIT_MB = 1800
+POLL_SECONDS = 0.25
+
+
 def render_in_subprocess(template, art_bytes, timeout=170):
     """Returns (jpeg_bytes, None) on success, or (None, error_message)."""
+    import time
+    import psutil
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     p = ctx.Process(target=_render_worker, args=(template, art_bytes, q))
     p.start()
-    p.join(timeout)
+    deadline = time.monotonic() + timeout
+    killed_for_memory = False
+    proc = None
+    while p.is_alive() and time.monotonic() < deadline:
+        try:
+            if proc is None:
+                proc = psutil.Process(p.pid)
+            rss_mb = proc.memory_info().rss / 1024 / 1024
+            for child in proc.children(recursive=True):
+                rss_mb += child.memory_info().rss / 1024 / 1024
+            if rss_mb > CHILD_RSS_LIMIT_MB:
+                killed_for_memory = True
+                p.terminate()
+                break
+        except psutil.NoSuchProcess:
+            break
+        time.sleep(POLL_SECONDS)
+    p.join(5)
     if p.is_alive():
         p.terminate()
         p.join()
-        return None, TOO_COMPLEX_MSG + " (it was taking too long)"
+    if killed_for_memory:
+        return None, TOO_COMPLEX_MSG
     if not q.empty():
         status, payload = q.get()
         if status == "ok":
@@ -67,6 +100,8 @@ def render_in_subprocess(template, art_bytes, timeout=170):
         if payload == "memory":
             return None, TOO_COMPLEX_MSG
         return None, f"Couldn't generate that mockup: {payload}"
+    if time.monotonic() >= deadline:
+        return None, TOO_COMPLEX_MSG + " (it was taking too long)"
     # process died with nothing in the queue - the OS killed it outright
     return None, TOO_COMPLEX_MSG
 
