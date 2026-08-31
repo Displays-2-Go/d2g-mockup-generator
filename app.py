@@ -58,7 +58,7 @@ TOO_COMPLEX_MSG = (
 # confirmed happening on the live service (some heavy products took the
 # whole app down, not just their own request, despite running in a
 # subprocess) before this watchdog was added.
-CHILD_RSS_LIMIT_MB = 1800
+CHILD_RSS_LIMIT_MB = 1950
 POLL_SECONDS = 0.25
 
 
