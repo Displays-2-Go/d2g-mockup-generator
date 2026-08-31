@@ -9,39 +9,13 @@ wherever the 45 .psd templates are stored on the host (a mounted disk,
 or baked into the image if size allows).
 """
 import io
-import multiprocessing as mp
+import os
+import subprocess
+import sys
+import tempfile
 from flask import Flask, request, render_template_string, send_file
 from PIL import Image
 import make_mockup
-
-
-def _render_worker(template, art_bytes, result_queue):
-    """Runs the actual (memory-hungry, on some products) render in a
-    throwaway child process. If a product's scene is too complex for the
-    host's memory, the container's own real memory limit kills this child -
-    but the PARENT process (this whole web app) survives regardless, and can
-    tell the rep it didn't work, rather than the whole tool going down for
-    everyone using it at that moment. Added 31/08 after finding some of the
-    45 Squiggles templates are too complex to reliably fit in the host's
-    memory, and Phil ruled out paying for more - the responsible fallback is
-    to fail one request cleanly, not let it take the whole service down.
-    (An earlier version of this also set its own lower memory cap via
-    `resource.setrlimit(RLIMIT_AS, ...)` to fail faster/cleaner than waiting
-    for the OS kill - removed same day: RLIMIT_AS caps virtual address space,
-    which for numpy/opencv runs far higher than actual resident memory, so
-    it was tripping on every product, including ones that fit comfortably.
-    The container's real memory limit is the only number that matters here.)"""
-    try:
-        art = Image.open(io.BytesIO(art_bytes))
-        result = make_mockup.make_mockup(template, art)
-        buf = io.BytesIO()
-        result.convert("RGB").save(buf, format="JPEG", quality=92)
-        result_queue.put(("ok", buf.getvalue()))
-    except MemoryError:
-        result_queue.put(("error", "memory"))
-    except Exception as e:
-        result_queue.put(("error", str(e)))
-
 
 TOO_COMPLEX_MSG = (
     "This product's scene is too complex to generate right now. "
@@ -49,65 +23,47 @@ TOO_COMPLEX_MSG = (
 )
 
 
-# Measured on the real host, 31/08: a genuinely successful render (blade
-# stand) peaks around 1.9GB resident memory on a 2GB-limit container - the
-# parent (this Flask app, idle) uses well under 100MB. Watching the CHILD's
-# own resident memory and killing it BEFORE it nears the container ceiling
-# is more reliable than waiting for the OS's own out-of-memory killer, which
-# is free to pick either process when the container as a whole runs out -
-# confirmed happening on the live service (some heavy products took the
-# whole app down, not just their own request, despite running in a
-# subprocess) before this watchdog was added.
-CHILD_RSS_LIMIT_MB = 1950
-POLL_SECONDS = 0.25
-
-
 def render_in_subprocess(template, art_bytes, timeout=170):
-    """Returns (jpeg_bytes, None) on success, or (None, error_message)."""
-    import time
-    import psutil
-    ctx = mp.get_context("spawn")
-    q = ctx.Queue()
-    p = ctx.Process(target=_render_worker, args=(template, art_bytes, q))
-    p.start()
-    deadline = time.monotonic() + timeout
-    killed_for_memory = False
-    proc = None
-    while p.is_alive() and time.monotonic() < deadline:
+    """Runs the actual (memory-hungry, on some products) render as a genuinely
+    separate OS process (render_worker.py via plain subprocess.run - NOT
+    Python's multiprocessing, which needed to re-import this whole app on
+    Linux via its 'spawn' bootstrap and hung indefinitely there for reasons
+    not fully pinned down, despite working fine in local testing; a plain
+    subprocess of a small standalone script is the simpler, standard,
+    well-tested way to isolate risky work and sidesteps that entirely).
+
+    If a product's scene is too complex for the host's memory, the
+    container's own real memory limit kills this child - but the PARENT
+    process (this whole web app) survives regardless, and can tell the rep
+    it didn't work, rather than the whole tool going down for everyone
+    using it at that moment. Added 31/08 after finding some of the 45
+    Squiggles templates are too complex to reliably fit in the host's
+    memory, and Phil ruled out paying for more - the responsible fallback
+    is to fail one request cleanly, not let it take the whole service down.
+
+    Returns (jpeg_bytes, None) on success, or (None, error_message)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        art_path = os.path.join(tmp, "art")
+        out_path = os.path.join(tmp, "out.jpg")
+        with open(art_path, "wb") as f:
+            f.write(art_bytes)
         try:
-            if proc is None:
-                proc = psutil.Process(p.pid)
-            rss_mb = proc.memory_info().rss / 1024 / 1024
-            if rss_mb > CHILD_RSS_LIMIT_MB:
-                killed_for_memory = True
-                p.terminate()
-                break
-        except psutil.NoSuchProcess:
-            break
-        time.sleep(POLL_SECONDS)
-    p.join(5)
-    if p.is_alive():
-        p.terminate()
-        p.join()
-    if killed_for_memory:
-        return None, TOO_COMPLEX_MSG
-    # Queue.empty() is documented as unreliable for multiprocessing.Queue -
-    # a bare q.get() after checking it can block forever if the child was
-    # killed mid-flush (found 31/08: real hangs on the live service, up to
-    # the full 300s test window, traced to exactly this). Always bound it.
-    try:
-        status, payload = q.get(timeout=5)
-        if status == "ok":
-            return payload, None
-        if payload == "memory":
+            proc = subprocess.run(
+                [sys.executable, os.path.join(os.path.dirname(__file__), "render_worker.py"),
+                 template, art_path, out_path],
+                timeout=timeout, capture_output=True, text=True,
+            )
+        except subprocess.TimeoutExpired:
+            return None, TOO_COMPLEX_MSG + " (it was taking too long)"
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            # non-zero exit with no useful stderr (or killed outright, e.g.
+            # by the OS for using too much memory) - treat the same way
+            msg = (proc.stderr or "").strip()
+            if msg:
+                return None, f"Couldn't generate that mockup: {msg}"
             return None, TOO_COMPLEX_MSG
-        return None, f"Couldn't generate that mockup: {payload}"
-    except Exception:
-        pass
-    if time.monotonic() >= deadline:
-        return None, TOO_COMPLEX_MSG + " (it was taking too long)"
-    # process died with nothing in the queue - the OS killed it outright
-    return None, TOO_COMPLEX_MSG
+        with open(out_path, "rb") as f:
+            return f.read(), None
 
 app = Flask(__name__)
 
