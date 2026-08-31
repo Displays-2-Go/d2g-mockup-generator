@@ -518,9 +518,25 @@ def render3(psd_path, art, out_path=None, mesh_n=64, crop=True):
     # each instance's own z-index: the 6x3 booth's chair sits above the
     # backdrop but below the topmost artwork instance, and a global above-top
     # mask missed it (chair got painted over).
+    # occ_layers stores each occluder at its OWN native patch size + offset,
+    # not padded to the full canvas - a scene with several small objects
+    # (people, hardware) was allocating a full-canvas array PER OBJECT purely
+    # to hold what's usually a small local patch (measured 618MB for 6
+    # objects on one 3000x2250 template - a real memory driver, found via
+    # profiling 25/08 after the Render deploy needed more RAM than expected).
+    # Every consumer below reads/writes only the [y0:y0+ph, x0:x0+pw] slice.
     tset = set(ti for ti,_,_ in targets)
-    occ_layers = []   # (idx, alpha HxW, rgb HxW3)
+    # every consumer of occ_layers only ever tests `j > i` against some
+    # target's own index - a layer sitting below EVERY target (index <= the
+    # lowest target index) can never satisfy that for any target, so it can
+    # never actually act as an occluder here. Skipping those is provably a
+    # no-op (found on the expo pop-up counter: 'Background' and 'Floor
+    # shadow' are full-canvas-sized background layers sitting below all 4
+    # targets - 175MB of full-canvas arrays that could never be used).
+    bottom_target = min(ti for ti,_,_ in targets)
+    occ_layers = []   # (idx, alpha patch (ph,pw), rgb patch (ph,pw,3), x0, y0)
     for i,l in enumerate(L):
+        if i <= bottom_target: continue
         if i in tset or not l.visible or l.kind in ADJUST: continue
         if l.kind not in ('pixel','smartobject'): continue
         if l.blend_mode != BlendMode.NORMAL or l.opacity != 255: continue
@@ -528,16 +544,19 @@ def render3(psd_path, art, out_path=None, mesh_n=64, crop=True):
         r = layer_patch(l, W, H)
         if r is None: continue
         patch,x0,y0 = r
-        a = np.zeros((H,W), np.float32)
-        a[y0:y0+patch.shape[0], x0:x0+patch.shape[1]] = patch[...,3]
-        rgb = np.zeros((H,W,3), np.float32)
-        rgb[y0:y0+patch.shape[0], x0:x0+patch.shape[1]] = patch[...,:3]
+        a = np.ascontiguousarray(patch[...,3])
+        rgb = np.ascontiguousarray(patch[...,:3])
         mk = emask(l)
-        if mk is not None: a *= mk
-        occ_layers.append((i, a, rgb))
+        if mk is not None:
+            mk_patch = mk[y0:y0+patch.shape[0], x0:x0+patch.shape[1]]
+            a = a * mk_patch
+        occ_layers.append((i, a, rgb, x0, y0))
     occl = np.zeros((H,W), np.float32)
-    for j,a,_ in occ_layers:
-        if j > top: occl = np.maximum(occl, a)
+    for j,a,_,x0,y0 in occ_layers:
+        if j > top:
+            ph_,pw_ = a.shape
+            sl = occl[y0:y0+ph_, x0:x0+pw_]
+            np.maximum(sl, a, out=sl)
 
     coverage = np.zeros((H,W), np.float32)   # panels: lighting re-pass runs here
     _old_cache = {}
@@ -597,25 +616,32 @@ def render3(psd_path, art, out_path=None, mesh_n=64, crop=True):
         if _solidity >= 200:
             import cv2
             occ = np.zeros((H,W), np.float32)
-            for _j,_a2,_ in occ_layers:
-                if _j > i: occ = np.maximum(occ, _a2)
+            for _j,_a2,_,_x0,_y0 in occ_layers:
+                if _j > i:
+                    _ph,_pw = _a2.shape
+                    _sl = occ[_y0:_y0+_ph, _x0:_x0+_pw]
+                    np.maximum(_sl, _a2, out=_sl)
             _orgba = old_warp(u, l, mk, pw, ph)
             if _orgba is not None:
                 oa = _orgba[...,3] > 0.5
                 orgb = _orgba[...,:3]
-                for _j,_a2,_rgb2 in occ_layers:
+                for _j,_a2,_rgb2,_x0,_y0 in occ_layers:
                     if _j <= i: continue
-                    if not ((_a2 > 0.5) & oa).any(): continue
+                    _ph,_pw = _a2.shape
+                    oa_c = oa[_y0:_y0+_ph, _x0:_x0+_pw]
+                    if not ((_a2 > 0.5) & oa_c).any(): continue
+                    orgb_c = orgb[_y0:_y0+_ph, _x0:_x0+_pw]
                     ncomp, lab = cv2.connectedComponents((_a2 > 0.5).astype(np.uint8))
                     for c in range(1, ncomp):
                         comp = lab == c
                         n = int(comp.sum())
                         if n < 400: continue
-                        if float((comp & oa).sum())/n < 0.85: continue
-                        sel = comp & oa
-                        if float(np.abs(_rgb2[sel] - orgb[sel]).mean()) < 0.10:
-                            occ[comp] = 0.0
-                            _bake_cut.setdefault(_j, np.zeros((H,W), bool))[comp] = True
+                        if float((comp & oa_c).sum())/n < 0.85: continue
+                        sel = comp & oa_c
+                        if float(np.abs(_rgb2[sel] - orgb_c[sel]).mean()) < 0.10:
+                            occ[_y0:_y0+_ph, _x0:_x0+_pw][comp] = 0.0
+                            _bc = _bake_cut.setdefault(_j, np.zeros((H,W), bool))
+                            _bc[_y0:_y0+_ph, _x0:_x0+_pw][comp] = True
         rgba[...,3] *= (1.0-occ)   # keep people/hardware in front untouched
         # PANEL vs SECONDARY. Across the whole template set, printed panels are
         # near-solid (opacity >= 230: NORMAL 255, MULTIPLY 255/fill 230, LINEAR_BURN
@@ -830,14 +856,19 @@ def render3(psd_path, art, out_path=None, mesh_n=64, crop=True):
                 r2 = layer_patch(lj, W, H)
                 if r2 is None: continue
                 patch2,x2,y2 = r2
-                a2 = np.zeros((H,W), np.float32)
-                a2[y2:y2+patch2.shape[0], x2:x2+patch2.shape[1]] = patch2[...,3]
+                # native patch size, not a full-canvas array (this loop runs
+                # per candidate layer per secondary target - same wasteful
+                # full-canvas-per-object pattern as occ_layers, fixed 25/08)
+                a2 = np.ascontiguousarray(patch2[...,3])
+                ph2,pw2 = a2.shape
                 mk2 = emask(lj)
-                if mk2 is not None: a2 *= mk2
+                if mk2 is not None:
+                    a2 = a2 * mk2[y2:y2+ph2, x2:x2+pw2]
                 # scene-sized plates (backgrounds) would erase the reflection
                 # outright - only compact hardware occludes
                 if float((a2>0.5).sum()) > 0.25*W*H: continue
-                osec = np.maximum(osec, a2)
+                sl = osec[y2:y2+ph2, x2:x2+pw2]
+                np.maximum(sl, a2, out=sl)
             if osec.max() > 0:
                 rgba = rgba.copy()
                 rgba[...,3] *= (1.0-osec)
