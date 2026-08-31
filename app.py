@@ -9,9 +9,72 @@ wherever the 45 .psd templates are stored on the host (a mounted disk,
 or baked into the image if size allows).
 """
 import io
+import multiprocessing as mp
 from flask import Flask, request, render_template_string, send_file
 from PIL import Image
 import make_mockup
+
+
+def _render_worker(template, art_bytes, result_queue):
+    """Runs the actual (memory-hungry, on some products) render in a
+    throwaway child process. If a product's scene is too complex for the
+    host's memory, this child dies - cleanly if the rlimit below catches it,
+    or via the OS's own out-of-memory killer if not - but either way the
+    PARENT process (this whole web app) survives and can tell the rep it
+    didn't work, rather than the whole tool going down for everyone using it
+    at that moment. Added 31/08 after finding some of the 45 Squiggles
+    templates are too complex to reliably fit in the host's memory, and
+    Phil ruled out paying for more memory - the responsible fallback is to
+    fail one request cleanly, not let it take the whole service down."""
+    try:
+        import resource
+        # cap this child's own memory so it raises a catchable MemoryError
+        # instead of relying on the OS to kill it outright - a controlled
+        # failure here is faster and doesn't destabilise the container.
+        _, hard = resource.getrlimit(resource.RLIMIT_AS)
+        cap = 1_700_000_000  # ~1.7GB - safely under the host's real ceiling
+        if hard == resource.RLIM_INFINITY or hard > cap:
+            resource.setrlimit(resource.RLIMIT_AS, (cap, hard))
+    except Exception:
+        pass  # not available on Windows/this platform - best effort only
+    try:
+        art = Image.open(io.BytesIO(art_bytes))
+        result = make_mockup.make_mockup(template, art)
+        buf = io.BytesIO()
+        result.convert("RGB").save(buf, format="JPEG", quality=92)
+        result_queue.put(("ok", buf.getvalue()))
+    except MemoryError:
+        result_queue.put(("error", "memory"))
+    except Exception as e:
+        result_queue.put(("error", str(e)))
+
+
+TOO_COMPLEX_MSG = (
+    "This product's scene is too complex to generate right now. "
+    "Try a different size/variant, or ask a rep to put the mockup together manually."
+)
+
+
+def render_in_subprocess(template, art_bytes, timeout=170):
+    """Returns (jpeg_bytes, None) on success, or (None, error_message)."""
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_render_worker, args=(template, art_bytes, q))
+    p.start()
+    p.join(timeout)
+    if p.is_alive():
+        p.terminate()
+        p.join()
+        return None, TOO_COMPLEX_MSG + " (it was taking too long)"
+    if not q.empty():
+        status, payload = q.get()
+        if status == "ok":
+            return payload, None
+        if payload == "memory":
+            return None, TOO_COMPLEX_MSG
+        return None, f"Couldn't generate that mockup: {payload}"
+    # process died with nothing in the queue - the OS killed it outright
+    return None, TOO_COMPLEX_MSG
 
 app = Flask(__name__)
 
@@ -171,15 +234,11 @@ def generate():
     if not template or not art_file:
         return render_template_string(PAGE, ranges=ranges, ratios=ratios, image_data_uri=None,
                                        error="Pick a product and upload an image."), 400
-    try:
-        art = Image.open(art_file.stream)
-        result = make_mockup.make_mockup(template, art)
-    except Exception as e:
+    jpeg_bytes, err = render_in_subprocess(template, art_file.stream.read())
+    if err:
         return render_template_string(PAGE, ranges=ranges, ratios=ratios, image_data_uri=None,
-                                       error=f"Couldn't generate that mockup: {e}"), 500
-    buf = io.BytesIO()
-    result.convert("RGB").save(buf, format="JPEG", quality=92)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                                       error=err), 500
+    b64 = base64.b64encode(jpeg_bytes).decode("ascii")
     if template.startswith("new:"):
         variant_name = template[len("new:"):]
     else:
