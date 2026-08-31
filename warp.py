@@ -133,15 +133,32 @@ def render_art(layer, art, canvas_wh, n=160):
 
 def render_art_fast(layer, art, canvas_wh, n=64):
     """Same result as render_art but ~50x faster: rasterise the Bezier patch
-    cell-by-cell with tiny perspective warps instead of scattered interpolation."""
+    cell-by-cell with tiny perspective warps instead of scattered interpolation.
+
+    The accumulator only ever gets written inside the warp's own bounding box
+    (every cell's `dq` is a small piece of it) - allocating it at full canvas
+    size was reserving the WHOLE picture's worth of memory to hold what's
+    typically a small patch (measured: 3000x2250 canvas but a 1562x1628
+    artwork region - allocating 4x more than needed, the single biggest
+    memory cost found profiling the Render deploy, 31/08). Accumulate at the
+    bbox's own size instead, then paste into a zero canvas of the requested
+    size only at the very end - mathematically identical, since the original
+    code never wrote outside that same bbox in a full-size canvas either."""
     W,H = canvas_wh
     DX,DY = warp_grid(layer, n+1)
     aw,ah = art.size
     A = np.array(art)
     u = np.linspace(0,1,n+1)*(aw-1)
     v = np.linspace(0,1,n+1)*(ah-1)
-    out = np.zeros((H,W,4), np.float32)
-    acc = np.zeros((H,W,1), np.float32)
+
+    bx0 = max(int(np.floor(DX.min()))-1, 0); bx1 = min(int(np.ceil(DX.max()))+2, W)
+    by0 = max(int(np.floor(DY.min()))-1, 0); by1 = min(int(np.ceil(DY.max()))+2, H)
+    bw, bh = max(bx1-bx0, 0), max(by1-by0, 0)
+    if bw <= 0 or bh <= 0:
+        return Image.fromarray(np.zeros((H,W,4), np.uint8))
+
+    out = np.zeros((bh,bw,4), np.float32)
+    acc = np.zeros((bh,bw,1), np.float32)
     for i in range(n):
         for j in range(n):
             dq = np.float32([[DX[i,j],DY[i,j]],[DX[i,j+1],DY[i,j+1]],
@@ -157,8 +174,14 @@ def render_art_fast(layer, art, canvas_wh, n=64):
             msk = np.zeros((y1-y0, x1-x0), np.float32)
             cv2.fillConvexPoly(msk, np.round((dq-np.float32([x0,y0]))*16).astype(np.int32),
                                1.0, lineType=cv2.LINE_AA, shift=4)
-            out[y0:y1, x0:x1] += patch.astype(np.float32)*msk[...,None]
-            acc[y0:y1, x0:x1] += msk[...,None]
+            # same target cell, offset into the bbox-sized accumulator instead
+            # of the full canvas
+            oy0,oy1 = y0-by0, y1-by0
+            ox0,ox1 = x0-bx0, x1-bx0
+            out[oy0:oy1, ox0:ox1] += patch.astype(np.float32)*msk[...,None]
+            acc[oy0:oy1, ox0:ox1] += msk[...,None]
     np.divide(out, np.maximum(acc,1e-6), out=out)
     out[...,3] *= np.clip(acc[...,0],0,1)
-    return Image.fromarray(np.clip(out,0,255).astype(np.uint8))
+    full = np.zeros((H,W,4), np.uint8)
+    full[by0:by1, bx0:bx1] = np.clip(out,0,255).astype(np.uint8)
+    return Image.fromarray(full)
