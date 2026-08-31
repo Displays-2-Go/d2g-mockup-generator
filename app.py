@@ -18,25 +18,19 @@ import make_mockup
 def _render_worker(template, art_bytes, result_queue):
     """Runs the actual (memory-hungry, on some products) render in a
     throwaway child process. If a product's scene is too complex for the
-    host's memory, this child dies - cleanly if the rlimit below catches it,
-    or via the OS's own out-of-memory killer if not - but either way the
-    PARENT process (this whole web app) survives and can tell the rep it
-    didn't work, rather than the whole tool going down for everyone using it
-    at that moment. Added 31/08 after finding some of the 45 Squiggles
-    templates are too complex to reliably fit in the host's memory, and
-    Phil ruled out paying for more memory - the responsible fallback is to
-    fail one request cleanly, not let it take the whole service down."""
-    try:
-        import resource
-        # cap this child's own memory so it raises a catchable MemoryError
-        # instead of relying on the OS to kill it outright - a controlled
-        # failure here is faster and doesn't destabilise the container.
-        _, hard = resource.getrlimit(resource.RLIMIT_AS)
-        cap = 1_700_000_000  # ~1.7GB - safely under the host's real ceiling
-        if hard == resource.RLIM_INFINITY or hard > cap:
-            resource.setrlimit(resource.RLIMIT_AS, (cap, hard))
-    except Exception:
-        pass  # not available on Windows/this platform - best effort only
+    host's memory, the container's own real memory limit kills this child -
+    but the PARENT process (this whole web app) survives regardless, and can
+    tell the rep it didn't work, rather than the whole tool going down for
+    everyone using it at that moment. Added 31/08 after finding some of the
+    45 Squiggles templates are too complex to reliably fit in the host's
+    memory, and Phil ruled out paying for more - the responsible fallback is
+    to fail one request cleanly, not let it take the whole service down.
+    (An earlier version of this also set its own lower memory cap via
+    `resource.setrlimit(RLIMIT_AS, ...)` to fail faster/cleaner than waiting
+    for the OS kill - removed same day: RLIMIT_AS caps virtual address space,
+    which for numpy/opencv runs far higher than actual resident memory, so
+    it was tripping on every product, including ones that fit comfortably.
+    The container's real memory limit is the only number that matters here.)"""
     try:
         art = Image.open(io.BytesIO(art_bytes))
         result = make_mockup.make_mockup(template, art)
