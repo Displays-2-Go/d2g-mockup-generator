@@ -78,8 +78,6 @@ def render_in_subprocess(template, art_bytes, timeout=170):
             if proc is None:
                 proc = psutil.Process(p.pid)
             rss_mb = proc.memory_info().rss / 1024 / 1024
-            for child in proc.children(recursive=True):
-                rss_mb += child.memory_info().rss / 1024 / 1024
             if rss_mb > CHILD_RSS_LIMIT_MB:
                 killed_for_memory = True
                 p.terminate()
@@ -93,13 +91,19 @@ def render_in_subprocess(template, art_bytes, timeout=170):
         p.join()
     if killed_for_memory:
         return None, TOO_COMPLEX_MSG
-    if not q.empty():
-        status, payload = q.get()
+    # Queue.empty() is documented as unreliable for multiprocessing.Queue -
+    # a bare q.get() after checking it can block forever if the child was
+    # killed mid-flush (found 31/08: real hangs on the live service, up to
+    # the full 300s test window, traced to exactly this). Always bound it.
+    try:
+        status, payload = q.get(timeout=5)
         if status == "ok":
             return payload, None
         if payload == "memory":
             return None, TOO_COMPLEX_MSG
         return None, f"Couldn't generate that mockup: {payload}"
+    except Exception:
+        pass
     if time.monotonic() >= deadline:
         return None, TOO_COMPLEX_MSG + " (it was taking too long)"
     # process died with nothing in the queue - the OS killed it outright
