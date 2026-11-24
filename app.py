@@ -88,7 +88,9 @@ button,.btn{margin-top:20px;padding:10px 20px;font-size:1rem;cursor:pointer;disp
 .dropzone .fname{margin-top:8px;font-size:0.9rem;color:#333;word-break:break-all}
 .result img{max-width:100%;border:1px solid #ddd;margin-top:16px}
 .result{margin-top:8px}
+.nav{font-size:0.95rem;color:#555}
 </style></head><body>
+<p class="nav"><b>Mockup generator</b> &middot; <a href="/check">Artwork checker</a></p>
 <h1>D2G Mockup Generator</h1>
 <p>Pick a product, upload the client's artwork (a website screenshot, logo, or product photo), and generate the mockup.</p>
 <form method="post" action="/generate" enctype="multipart/form-data">
@@ -236,6 +238,197 @@ def generate():
     return render_template_string(
         PAGE, ranges=ranges, ratios=ratios, error=None,
         image_data_uri=f"data:image/jpeg;base64,{b64}", download_name=out_name)
+
+
+# ---------------------------------------------------------------- artwork checker
+
+import json as _json
+
+SPECS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "print_specs.json")
+app.config["MAX_CONTENT_LENGTH"] = 400 * 1024 * 1024   # largest upload accepted (400MB)
+
+
+def load_specs():
+    try:
+        with open(SPECS_PATH, encoding="utf-8") as f:
+            return _json.load(f)
+    except (OSError, ValueError):
+        return {"confirmed": False, "defaults": {"bleed_mm": 10, "safe_mm": 50, "min_dpi": 100}, "products": []}
+
+
+def check_in_subprocess(file_bytes, filename, spec, timeout=150):
+    """Same isolation as render_in_subprocess: a huge or broken file fails
+    only its own request. Returns (report dict, png bytes or None, error)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "upload")
+        oj, op = os.path.join(tmp, "out.json"), os.path.join(tmp, "out.png")
+        with open(src, "wb") as f:
+            f.write(file_bytes)
+        try:
+            proc = subprocess.run(
+                [sys.executable, os.path.join(os.path.dirname(__file__), "check_worker.py"),
+                 src, filename, _json.dumps(spec), oj, op],
+                timeout=timeout, capture_output=True, text=True)
+        except subprocess.TimeoutExpired:
+            return None, None, "That file took too long to check. Try a smaller export, or send it to a rep."
+        if proc.returncode != 0 or not os.path.exists(oj):
+            return None, None, "Couldn't check that file" + (f": {proc.stderr.strip()}" if proc.stderr.strip() else ".")
+        with open(oj, encoding="utf-8") as f:
+            rep = _json.load(f)
+        png = open(op, "rb").read() if os.path.exists(op) else None
+        return rep, png, None
+
+
+def spec_from_form(form, specs):
+    d = specs.get("defaults", {})
+    def num(name, default):
+        try:
+            v = float(form.get(name, ""))
+            return v if v >= 0 else default
+        except ValueError:
+            return default
+    spec = {"width_mm": num("width_mm", 0), "height_mm": num("height_mm", 0),
+            "bleed_mm": num("bleed_mm", d.get("bleed_mm", 10)), "safe_mm": num("safe_mm", d.get("safe_mm", 50)),
+            "min_dpi": num("min_dpi", d.get("min_dpi", 100))}
+    if spec["width_mm"] <= 0 or spec["height_mm"] <= 0:
+        return None
+    return spec
+
+
+CHECK_PAGE = """
+<!doctype html><html><head><title>D2G Artwork Checker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 16px;color:#222}
+h1{font-size:1.3rem} .nav{font-size:0.95rem;color:#555}
+label{display:block;margin-top:12px;font-weight:600}
+select,input{padding:8px;margin-top:4px;font-size:1rem}
+select{width:100%;max-width:420px}
+.row{display:flex;gap:12px;flex-wrap:wrap} .row label{flex:1;min-width:120px} .row input{width:100%;box-sizing:border-box}
+button{margin-top:20px;padding:10px 20px;font-size:1rem;cursor:pointer;border:1px solid #888;border-radius:4px;background:#f4f4f4}
+.note{background:#fff7e0;border:1px solid #e8c96a;padding:8px 12px;border-radius:4px;font-size:0.92rem;margin-top:12px}
+.err{color:#b00020;margin-top:12px}
+.overall{font-size:1.15rem;font-weight:700;margin-top:24px;padding:10px 14px;border-radius:6px}
+.overall.pass{background:#e6f6ec;color:#11602f} .overall.warn{background:#fff4dc;color:#7a5200} .overall.fail{background:#fde8ea;color:#8a1020}
+.checks{list-style:none;padding:0;margin:12px 0}
+.checks li{border-bottom:1px solid #eee;padding:10px 0;display:flex;gap:12px}
+.badge{flex:none;width:64px;text-align:center;font-size:0.8rem;font-weight:700;border-radius:4px;padding:3px 0;height:fit-content}
+.b-pass{background:#e6f6ec;color:#11602f} .b-warn{background:#fff4dc;color:#7a5200} .b-fail{background:#fde8ea;color:#8a1020} .b-info{background:#eef1f6;color:#3a4a66}
+.fix{color:#555;font-size:0.92rem;margin-top:3px}
+.preview img{max-width:100%;max-height:600px;border:1px solid #ddd;margin-top:8px}
+.legend span{display:inline-block;margin-right:14px;font-size:0.88rem}
+.sw{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:5px}
+</style></head><body>
+<p class="nav"><a href="/">Mockup generator</a> &middot; <b>Artwork checker</b></p>
+<h1>Is this artwork ready to print?</h1>
+<p>Upload the print file (PDF is best; JPG, PNG and TIFF also work) and choose the product or enter its finished size.
+You'll get a plain-English list of anything that needs fixing.</p>
+{% if not confirmed %}<p class="note">Draft settings: the bleed, safe zone and resolution rules below have not yet been confirmed by D2G.</p>{% endif %}
+<form method="post" action="/check" enctype="multipart/form-data">
+  <label>Product
+    <select id="product">
+      <option value="">Custom size (enter below)</option>
+      {% for p in products %}<option value="{{ loop.index0 }}" {% if form.get('product') == loop.index0|string %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+    </select>
+    <input type="hidden" name="product" id="productField" value="{{ form.get('product','') }}">
+  </label>
+  <div class="row">
+    <label>Finished width (mm)<input name="width_mm" id="width_mm" inputmode="decimal" required value="{{ form.get('width_mm','') }}"></label>
+    <label>Finished height (mm)<input name="height_mm" id="height_mm" inputmode="decimal" required value="{{ form.get('height_mm','') }}"></label>
+  </div>
+  <div class="row">
+    <label>Bleed (mm)<input name="bleed_mm" id="bleed_mm" inputmode="decimal" value="{{ form.get('bleed_mm', defaults.bleed_mm) }}"></label>
+    <label>Safe zone (mm)<input name="safe_mm" id="safe_mm" inputmode="decimal" value="{{ form.get('safe_mm', defaults.safe_mm) }}"></label>
+    <label>Lowest photo resolution (dpi at full size)<input name="min_dpi" id="min_dpi" inputmode="decimal" value="{{ form.get('min_dpi', defaults.min_dpi) }}"></label>
+  </div>
+  <label>Print file<input type="file" name="art" required accept=".pdf,image/*"></label>
+  <button type="submit">Check artwork</button>
+</form>
+{% if error %}<p class="err">{{ error }}</p>{% endif %}
+{% if report %}
+  <div class="overall {{ report.overall }}">
+    {% if report.overall == 'pass' %}Ready to print{% elif report.overall == 'warn' %}Printable, but worth a look{% else %}Needs fixing before print{% endif %}
+    &nbsp;<span style="font-weight:400">({{ filename }})</span>
+  </div>
+  <ul class="checks">
+  {% for c in report.checks %}
+    <li><span class="badge b-{{ c.status }}">{{ {'pass':'OK','warn':'CHECK','fail':'FIX','info':'NOTE'}[c.status] }}</span>
+      <div><b>{{ c.name }}</b>: {{ c.detail }}{% if c.fix and c.status != 'pass' %}<div class="fix">How to fix: {{ c.fix }}</div>{% endif %}</div></li>
+  {% endfor %}
+  </ul>
+  {% if preview %}
+  <div class="preview">
+    <div class="legend">
+      {% if report.facts.kind == 'pdf' %}<span><i class="sw" style="background:#e600a0"></i>trim (cut line)</span>
+      <span><i class="sw" style="background:#00aadc"></i>bleed edge</span>
+      <span><i class="sw" style="background:#00a03c"></i>safe zone</span>{% endif %}
+    </div>
+    <img src="{{ preview }}" alt="Preview of page 1 with trim, bleed and safe zone lines">
+  </div>
+  {% endif %}
+{% endif %}
+<script>
+const products = {{ products|tojson }};
+const sel = document.getElementById('product');
+sel.addEventListener('change', () => {
+  document.getElementById('productField').value = sel.value;
+  const p = products[sel.value];
+  if (!p) return;
+  for (const k of ['width_mm','height_mm','bleed_mm','safe_mm','min_dpi'])
+    if (p[k] !== undefined) document.getElementById(k).value = p[k];
+});
+</script>
+</body></html>
+"""
+
+
+def _check_ctx(**kw):
+    specs = load_specs()
+    ctx = dict(products=specs.get("products", []), defaults=specs.get("defaults", {}),
+               confirmed=specs.get("confirmed", False), form={}, report=None, preview=None,
+               error=None, filename="")
+    ctx.update(kw)
+    return ctx
+
+
+@app.route("/check", methods=["GET"])
+def check_page():
+    return render_template_string(CHECK_PAGE, **_check_ctx())
+
+
+@app.route("/check", methods=["POST"])
+def check_artwork_page():
+    import base64
+    specs = load_specs()
+    form = request.form.to_dict()
+    f = request.files.get("art")
+    spec = spec_from_form(request.form, specs)
+    if not f or not spec:
+        return render_template_string(CHECK_PAGE, **_check_ctx(
+            form=form, error="Enter the finished width and height, and choose a file.")), 400
+    rep, png, err = check_in_subprocess(f.stream.read(), f.filename or "upload", spec)
+    if err:
+        return render_template_string(CHECK_PAGE, **_check_ctx(form=form, error=err)), 500
+    preview = "data:image/png;base64," + base64.b64encode(png).decode("ascii") if png else None
+    return render_template_string(CHECK_PAGE, **_check_ctx(form=form, report=rep, preview=preview,
+                                                           filename=f.filename or ""))
+
+
+@app.route("/api/check", methods=["POST"])
+def check_api():
+    """Same check as /check, as JSON - for wiring into the main website later.
+    Form fields: art (file), width_mm, height_mm, and optionally bleed_mm,
+    safe_mm, min_dpi."""
+    specs = load_specs()
+    f = request.files.get("art")
+    spec = spec_from_form(request.form, specs)
+    if not f or not spec:
+        return {"error": "send 'art' plus width_mm and height_mm"}, 400
+    rep, _, err = check_in_subprocess(f.stream.read(), f.filename or "upload", spec)
+    if err:
+        return {"error": err}, 500
+    rep["spec"] = spec
+    return rep
 
 
 if __name__ == "__main__":

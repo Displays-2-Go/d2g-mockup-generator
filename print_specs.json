@@ -1,0 +1,8 @@
+{
+ "_read_me": "Settings for the artwork checker (/check). 'defaults' fill the form for a custom size. Add D2G products to 'products' so people can pick them by name. All sizes in mm; min_dpi = lowest acceptable resolution for photos at FULL printed size. Set 'confirmed' to true once D2G has checked these numbers: until then the page shows a 'draft settings' note.",
+ "confirmed": false,
+ "defaults": {"bleed_mm": 10, "safe_mm": 50, "min_dpi": 100},
+ "products": [
+  {"_example": "copy this shape for each product, e.g.", "name": "Example: pull-up banner 850mm", "width_mm": 850, "height_mm": 2000, "bleed_mm": 10, "safe_mm": 50, "min_dpi": 100}
+ ]
+}

@@ -6,3 +6,6 @@ numpy
 Pillow
 scipy
 psutil
+pikepdf
+pdfplumber
+pypdfium2
