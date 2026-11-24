@@ -36,6 +36,13 @@ TEMPLATE_DIR = Path(os.environ.get(
     "TEMPLATE_DIR",
     r"C:\Users\PhilHine\OneDrive - Displays 2 Go\Shared Documents - Squiggles\Photos\editable photoshop files"))
 
+# Template packs (see template_pack.py): the light, pre-converted form of the
+# .psd files that the live app should use. When TEMPLATE_PACKS_DIR is set, the
+# picker lists packs from there (same range/file.psd names, each a folder
+# ending .psd.pack) and a render never opens a .psd at all. A template with no
+# pack still falls back to its .psd in TEMPLATE_DIR.
+PACKS_DIR = Path(os.environ["TEMPLATE_PACKS_DIR"]) if os.environ.get("TEMPLATE_PACKS_DIR") else None
+
 # Sizes with no Squiggles PSD, built from a real product photo instead (see
 # photo_template.py). Kept in their own pseudo-range so the picker still
 # groups by product but never confuses the two mechanisms.
@@ -48,7 +55,12 @@ def list_templates():
     variant. Template identifier used elsewhere is "range/filename.psd" for
     the Squiggles files, or "new:<key>" for a photo_template.py size."""
     out = {}
-    if TEMPLATE_DIR.is_dir():
+    if PACKS_DIR is not None and PACKS_DIR.is_dir():
+        for range_dir in sorted(p for p in PACKS_DIR.iterdir() if p.is_dir()):
+            variants = sorted(p.name[:-len(".pack")] for p in range_dir.glob("*.psd.pack") if p.is_dir())
+            if variants:
+                out[range_dir.name] = variants
+    if not out and TEMPLATE_DIR.is_dir():
         for range_dir in sorted(p for p in TEMPLATE_DIR.iterdir() if p.is_dir()):
             variants = sorted(p.name for p in range_dir.glob("*.psd"))
             if variants:
@@ -100,18 +112,15 @@ def _scan_ratio(template_key):
         manifest = photo_template.list_new_templates()
         t = manifest[template_key[len("new:"):]]
         return t["true_w"], t["true_h"]
-    from psd_tools import PSDImage
-    psd_path = TEMPLATE_DIR / template_key
-    psd = PSDImage.open(str(psd_path))
+    psd = engine.open_template(template_path(template_key))
     A = engine.assets(psd)
     best, best_area = None, 0
     for uuid, g in A.items():
         if not g["editable"] or g["psb"] is None:
             continue
-        inner = PSDImage.open(io.BytesIO(g["psb"]))
-        area = inner.width * inner.height
-        if area > best_area:
-            best_area, best = area, (inner.width, inner.height)
+        w, h = engine.psb_size(g["psb"])
+        if w * h > best_area:
+            best_area, best = w * h, (w, h)
     return best
 
 
@@ -145,6 +154,37 @@ def ratio_labels():
     return labels
 
 
+def template_path(template_key):
+    """Where a "range/file.psd" template lives: its pack if one exists, else
+    the .psd itself."""
+    if PACKS_DIR is not None:
+        pack = PACKS_DIR / (template_key + ".pack")
+        if pack.is_dir():
+            return pack
+    return TEMPLATE_DIR / template_key
+
+
+def render_template_path(path, client_art):
+    """Render a Squiggles template given as a .psd path or a pack folder.
+    The template is opened once and shared by every step."""
+    if isinstance(client_art, (bytes, bytearray)):
+        client_art = Image.open(io.BytesIO(client_art))
+    client_art = client_art.convert("RGBA")
+    psd = engine.open_template(path)
+    A = engine.assets(psd)
+
+    artmap = {}
+    for uuid, g in A.items():
+        if not g["editable"] or g["psb"] is None:
+            continue
+        composed = engine.compose_into_placeholder(g["psb"], client_art)
+        if composed is None:
+            composed = engine.safe_fit(client_art, *engine.psb_size(g["psb"]))
+        artmap[uuid] = composed
+
+    return engine.render3(psd, artmap, mesh_n=64, crop=False)
+
+
 def make_mockup(template_key, client_art):
     """template_key: "range/filename.psd" - range is the sub-folder name,
     filename is one of list_templates()[range]. Or "new:<key>" for a
@@ -158,22 +198,7 @@ def make_mockup(template_key, client_art):
     if template_key.startswith("new:"):
         return photo_template.make_mockup_from_new_template(template_key[len("new:"):], client_art)
 
-    psd_path = TEMPLATE_DIR / template_key
-    from psd_tools import PSDImage
-    psd = PSDImage.open(str(psd_path))
-    A = engine.assets(psd)
-
-    artmap = {}
-    for uuid, g in A.items():
-        if not g["editable"] or g["psb"] is None:
-            continue
-        composed = engine.compose_into_placeholder(g["psb"], client_art)
-        if composed is None:
-            inner = PSDImage.open(io.BytesIO(g["psb"]))
-            composed = engine.safe_fit(client_art, inner.width, inner.height)
-        artmap[uuid] = composed
-
-    return engine.render3(str(psd_path), artmap, mesh_n=64, crop=False)
+    return render_template_path(template_path(template_key), client_art)
 
 
 if __name__ == "__main__":

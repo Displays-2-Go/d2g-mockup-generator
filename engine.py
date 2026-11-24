@@ -4,7 +4,7 @@
   - EVERY visible instance of that uuid (front panel, reflection, side panel)
     must be re-rendered, each with its own transform quad + envelope warp + mask
 """
-import io, numpy as np
+import io, os, numpy as np
 from PIL import Image
 from psd_tools import PSDImage
 from psd_tools.constants import BlendMode, Tag
@@ -13,7 +13,36 @@ from warp import render_art, render_art_fast, warp_grid
 ADJUST = {'huesaturation','brightnesscontrast','levels','exposure','curves',
           'colorbalance','gradientmap','selectivecolor','photofilter','channelmixer'}
 
+def open_template(path_or_psd):
+    """A template given as a .psd path, a template pack folder (see
+    template_pack.py - the light way the live app uses), or an already-open
+    PSDImage/PackedPSD (so callers never open the same file twice)."""
+    if not isinstance(path_or_psd, (str, bytes, os.PathLike)):
+        return path_or_psd
+    import template_pack
+    if template_pack.is_pack(path_or_psd):
+        return template_pack.PackedPSD(path_or_psd)
+    return PSDImage.open(str(path_or_psd))
+
+def _is_packed(obj):
+    return getattr(obj, '_pack', None) is not None or hasattr(obj, 'packed_leaves')
+
+def psb_size(psb):
+    """(width, height) of an editable smart object's embedded document."""
+    if _is_packed(psb):
+        return psb.width, psb.height
+    inner = PSDImage.open(io.BytesIO(psb))
+    return inner.width, inner.height
+
+def psb_stock(psb):
+    """The smart object's own stock artwork, rendered (RGBA)."""
+    if _is_packed(psb):
+        return psb.stock()
+    return PSDImage.open(io.BytesIO(psb)).composite(force=True).convert('RGBA')
+
 def leaves(node):
+    if hasattr(node, 'packed_leaves'):
+        return list(node.packed_leaves)
     out=[]
     def w(ls):
         for l in ls:
@@ -27,6 +56,8 @@ def placed(l):
 
 def assets(psd):
     """-> {uuid: {'layers':[(idx,layer)], 'editable':bool, 'psb':bytes|None}}"""
+    if hasattr(psd, 'packed_assets'):
+        return psd.packed_assets()
     L = leaves(psd); groups={}
     for i,l in enumerate(L):
         if l.kind!='smartobject': continue
@@ -83,6 +114,12 @@ def eff_mask_factory(psd, W, H):
     """mask lookup that INCLUDES ancestor group masks - the pop-up counter
     hides the model's legs with a mask on her GROUP, and flattening to leaves
     lost it (white ghost legs carved into the new counter art)."""
+    if hasattr(psd, 'packed_leaves'):
+        _pc = {}
+        def _packed_emask(l):
+            if id(l) not in _pc: _pc[id(l)] = l.emask()
+            return _pc[id(l)]
+        return _packed_emask
     anc = {}
     def _walk(node, stack):
         for ch in node:
@@ -225,8 +262,12 @@ def reference(psd_path):
 # ---------------------------------------------------------------------------
 
 def stored_preview(psd_path):
-    """The flattened image Photoshop saved in the file - true ground truth."""
-    return PSDImage.open(psd_path).composite().convert('RGB')
+    """The flattened image Photoshop saved in the file - true ground truth.
+    Accepts a path, a pack folder, or an already-open template."""
+    psd = open_template(psd_path)
+    if hasattr(psd, 'preview'):
+        return psd.preview()
+    return psd.composite().convert('RGB')
 
 def flat_composite(psd, subs=None, skip=(), W=None, H=None):
     """subs: {id(layer): RGBA float array} to substitute for that layer."""
@@ -289,6 +330,11 @@ def render2(psd_path, art, out_path=None, mesh_n=160, crop=True):
 
 def layer_patch(l, W, H):
     """-> (rgba float array, x0, y0) rendered at the layer's own bbox."""
+    if _is_packed(l):
+        r = l.patch()
+        if r is None: return None
+        arr, x0, y0 = r
+        return arr.astype(np.float32)/255.0, x0, y0
     try:
         bx = l.bbox
     except Exception:
@@ -371,9 +417,11 @@ def render3(psd_path, art, out_path=None, mesh_n=64, crop=True):
     by Photoshop itself - and only replace the artwork region. Sidesteps every
     background/gradient/canvas layer that psd_tools renders wrongly, because we
     never re-render them: they are already correct in the preview."""
-    psd = PSDImage.open(psd_path)
+    # open ONCE (this used to open the whole .psd a second time just for the
+    # preview, and the caller had a third copy open - all held in memory)
+    psd = open_template(psd_path)
     W,H = psd.width, psd.height
-    base = np.asarray(stored_preview(psd_path).convert('RGB')).astype(np.float32)/255.0
+    base = np.asarray(stored_preview(psd).convert('RGB')).astype(np.float32)/255.0
     if base.shape[0]!=H or base.shape[1]!=W:
         base = np.asarray(Image.fromarray((base*255).astype(np.uint8)).resize((W,H))).astype(np.float32)/255.0
 
@@ -567,7 +615,7 @@ def render3(psd_path, art, out_path=None, mesh_n=64, crop=True):
         """The template's own stock art warped through this instance."""
         if u not in _old_cache:
             try:
-                _old_cache[u] = PSDImage.open(io.BytesIO(A[u]['psb'])).composite(force=True).convert('RGBA')
+                _old_cache[u] = psb_stock(A[u]['psb'])
             except Exception:
                 _old_cache[u] = None
         old_src = _old_cache.get(u)
@@ -964,6 +1012,8 @@ def placeholder_box(psb_bytes):
     the smart object, plus the .psb rendered WITHOUT it (the surround to keep),
     plus the ORIGINAL composite's alpha = the printable region stencil (curved
     hems, notches around hardware - NOT a plain rectangle)."""
+    if _is_packed(psb_bytes):
+        return psb_bytes.placeholder_info()
     inner = PSDImage.open(io.BytesIO(psb_bytes))
     W,H = inner.width, inner.height
     lys=[]

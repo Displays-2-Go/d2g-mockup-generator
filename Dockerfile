@@ -9,7 +9,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-# The 45 .psd templates are NOT baked into this image (they total ~3.2GB).
+# PREFERRED: template packs (see template_pack.py). Run once on the PC with
+# the .psd files:  python template_pack.py bake "<psd folder>" packs
+# then copy the packs folder here (or mount it) and set TEMPLATE_PACKS_DIR.
+# Renders then never open a .psd. If the packs are small enough, uncomment:
+# COPY packs /app/packs
+# ENV TEMPLATE_PACKS_DIR=/app/packs
+#
+# FALLBACK: the 45 .psd templates are NOT baked into this image (~3.2GB).
 # Mount them at /app/templates as a persistent disk/volume on whatever host
 # runs this, or download them at container start from wherever they're
 # stored (OneDrive/S3/etc) - either way, make_mockup.TEMPLATE_DIR must end
