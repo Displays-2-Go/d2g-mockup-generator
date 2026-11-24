@@ -56,6 +56,21 @@ def _aspect_status(w, h, fw, fh):
     return diff, rot
 
 
+def _norm_spec(spec):
+    """-> (trim w, trim h, (bleed L, R, T, B), safe zone, recommended dpi,
+    lowest acceptable dpi, width adjustable). Bleed can be one number
+    (bleed_mm) or per side (bleed_left_mm ...), since D2G's guides often give
+    e.g. 5mm sides, 15mm top, 30mm bottom. D2G's general rule: 150ppi best,
+    75ppi lowest acceptable - so lowest defaults to half the recommended."""
+    b = float(spec.get("bleed_mm", 0) or 0)
+    sides = tuple(float(spec.get(f"bleed_{k}_mm", b) if spec.get(f"bleed_{k}_mm") is not None else b)
+                  for k in ("left", "right", "top", "bottom"))
+    rec = float(spec.get("min_dpi") or 150)
+    low = float(spec.get("lowest_dpi") or rec / 2)
+    return (float(spec["width_mm"] or 0), float(spec["height_mm"]), sides, float(spec.get("safe_mm") or 0),
+            rec, low, bool(spec.get("width_adjustable")))
+
+
 # ------------------------------------------------------------------ PDF ---
 
 def _pdf_boxes(page):
@@ -221,8 +236,8 @@ def _check_pdf(data, spec):
     import pikepdf
     import pdfplumber
     checks, facts = [], {}
-    fw, fh = float(spec["width_mm"]), float(spec["height_mm"])
-    bleed_req, safe_req, min_dpi = float(spec["bleed_mm"]), float(spec["safe_mm"]), float(spec["min_dpi"])
+    fw, fh, (bl, br, bt, bb), safe_req, min_dpi, lowest_dpi, adj = _norm_spec(spec)
+    bleed_any = max(bl, br, bt, bb) > 0
 
     try:
         pdf = pikepdf.open(io.BytesIO(data))
@@ -247,37 +262,55 @@ def _check_pdf(data, spec):
     pw_mm, ph_mm = (page_box[2] - page_box[0]) * PT_MM, (page_box[3] - page_box[1]) * PT_MM
     has_trim = trim is not None and any(abs(a - b) > 0.5 for a, b in zip(trim, page_box))
 
-    # ---- size, scale, bleed
-    scale = rotated = None
-    bleed_avail_mm = None  # at FULL size
+    def match(w, h, a, b):
+        """scale/rotation match; for adjustable-width products only the height counts."""
+        if adj:
+            for s_ in SCALES:
+                if abs(h - b * s_) <= max(2.0 * s_, b * s_ * 0.015):
+                    return s_, False
+            return None, None
+        return _match_scale(w, h, a, b)
+
+    # ---- size, scale, bleed (per side, at the supplied scale)
     if has_trim:
         tw, th = (trim[2] - trim[0]) * PT_MM, (trim[3] - trim[1]) * PT_MM
-        scale, rotated = _match_scale(tw, th, fw, fh)
+        scale, rotated = match(tw, th, fw, fh)
         outer = bleedbox or page_box
-        sides = [trim[0] - outer[0], trim[1] - outer[1], outer[2] - trim[2], outer[3] - trim[3]]
-        bleed_here = max(0.0, min(sides)) * PT_MM
-        trim_mm = (tw, th)
+        avail = [max(0.0, v) * PT_MM for v in (trim[0] - outer[0], outer[2] - trim[2],
+                                                 outer[3] - trim[3], trim[1] - outer[1])]  # L R T B
     else:
-        trim = page_box
         # no trim box: the page is either the finished size, or finished + bleed
-        s0, r0 = _match_scale(pw_mm, ph_mm, fw, fh)
-        s1, r1 = _match_scale(pw_mm, ph_mm, fw + 2 * bleed_req, fh + 2 * bleed_req) if bleed_req > 0 else (None, None)
-        if s1 is not None and (s0 is None or bleed_req > 0):
+        s1 = r1 = None
+        if bleed_any:
+            if adj:
+                s1, r1 = match(0, ph_mm, 0, fh + bt + bb)
+            else:
+                s1, r1 = match(pw_mm, ph_mm, fw + bl + br, fh + bt + bb)
+        s0, r0 = match(pw_mm, ph_mm, fw, fh)
+        if s1 is not None:
             scale, rotated = s1, r1
-            b = bleed_req * s1 / PT_MM
-            trim = (page_box[0] + b, page_box[1] + b, page_box[2] - b, page_box[3] - b)
-            bleed_here = bleed_req * s1
+            k = s1 / PT_MM
+            trim = (page_box[0] + bl * k, page_box[1] + bb * k, page_box[2] - br * k, page_box[3] - bt * k)
+            avail = [bl * s1, br * s1, bt * s1, bb * s1]
         else:
+            trim = page_box
             scale, rotated = s0, r0
-            bleed_here = 0.0
-        trim_mm = ((trim[2] - trim[0]) * PT_MM, (trim[3] - trim[1]) * PT_MM)
+            avail = [0.0, 0.0, 0.0, 0.0]
+        tw, th = (trim[2] - trim[0]) * PT_MM, (trim[3] - trim[1]) * PT_MM
 
-    tw, th = trim_mm
+    if adj and scale:
+        fw = tw / scale   # width is the customer's choice
     facts["page_mm"] = [round(pw_mm, 1), round(ph_mm, 1)]
     facts["trim_mm"] = [round(tw, 1), round(th, 1)]
+    size_txt = (f"{fh:.0f}mm high (width to suit)" if adj else _fmt_mm(fw, fh))
     if scale is None:
-        diff, rot = _aspect_status(tw, th, fw, fh)
-        if rot < 0.01 and diff > 0.01:
+        diff, rot = _aspect_status(tw, th, fw, fh) if not adj else (0.0, 1.0)
+        if adj:
+            scale = th / fh
+            checks.append(_check("Size and shape", FAIL,
+                                 f"The artwork is {th:.0f}mm high; this product needs {fh:.0f}mm high (or a scaled version).",
+                                 f"Set the artboard height to {fh:.0f}mm, plus the bleed."))
+        elif rot < 0.01 and diff > 0.01:
             checks.append(_check("Size and shape", FAIL,
                                  f"The artwork is {_fmt_mm(tw, th)}, turned the other way to the product ({_fmt_mm(fw, fh)}).",
                                  "Rotate the artboard to match the product's orientation."))
@@ -300,23 +333,29 @@ def _check_pdf(data, spec):
                                  "Rotate the artboard to match the product's orientation."))
         else:
             pct = "" if scale == 1 else f" (supplied at {scale*100:.0f}% scale, which is fine)"
-            checks.append(_check("Size and shape", PASS, f"Finished size {_fmt_mm(fw, fh)}{pct}."))
+            checks.append(_check("Size and shape", PASS, f"Finished size {size_txt}{pct}."))
     facts["scale"] = round(scale, 4)
 
-    bleed_full = bleed_here / scale if scale else 0.0
-    bleed_avail_mm = bleed_full
-    if bleed_req <= 0:
+    have = [a / scale for a in avail]            # at FULL size, L R T B
+    need = [bl, br, bt, bb]
+    names = ["left", "right", "top", "bottom"]
+    facts["bleed_mm"] = {n_: round(h, 1) for n_, h in zip(names, have)}
+    uniform = len(set(need)) == 1
+    need_txt = (f"{bl:.0f}mm on every side" if uniform else
+                ", ".join(f"{v:.0f}mm {n_}" for n_, v in zip(names, need)))
+    short = [(n_, h, r) for n_, h, r in zip(names, have, need) if r > 0 and h + 0.5 < r]
+    if not bleed_any:
         checks.append(_check("Bleed", INFO, "This product doesn't need bleed."))
-    elif bleed_full + 0.5 >= bleed_req:
-        checks.append(_check("Bleed", PASS, f"{bleed_full:.0f}mm of bleed on every side (needs {bleed_req:.0f}mm)."))
-    elif bleed_full > 0.5:
-        checks.append(_check("Bleed", WARN, f"Only {bleed_full:.0f}mm of bleed (needs {bleed_req:.0f}mm on every side).",
-                             f"Extend the background {bleed_req:.0f}mm past the trim on all four sides."))
+    elif not short:
+        checks.append(_check("Bleed", PASS, f"Bleed is all there ({need_txt})."))
+    elif all(h <= 0.5 for _, h, _ in short) and len(short) == sum(1 for r in need if r > 0):
+        checks.append(_check("Bleed", FAIL, f"No bleed. This product needs {need_txt}, or a thin white edge can show after cutting.",
+                             "Add the bleed in the export settings and extend the background to fill it."))
     else:
-        checks.append(_check("Bleed", FAIL, f"No bleed. The background needs to run {bleed_req:.0f}mm past the trim on every side,"
-                                            " or a thin white edge can show after cutting.",
-                             "Add bleed in the export settings and extend the background to fill it."))
-    facts["bleed_mm"] = round(bleed_avail_mm, 1)
+        checks.append(_check("Bleed", WARN if all(h > 0.5 for _, h, _ in short) else FAIL,
+                             "Not enough bleed: " + ", ".join(f"{n_} has {h:.0f}mm (needs {r:.0f}mm)" for n_, h, r in short) + ".",
+                             f"Extend the background past the trim: {need_txt}."))
+    bleed_avail_mm = max(have) if have else 0.0
 
     # ---- images: resolution at full size
     low, very_low, worst = [], [], None
@@ -335,7 +374,7 @@ def _check_pdf(data, spec):
             full_h_in = (hpt * PT_MM / scale) / 25.4
             dpi = min(sw / full_w_in, sh / full_h_in)
             worst = dpi if worst is None else min(worst, dpi)
-            if dpi < 0.5 * min_dpi:
+            if dpi < 0.98 * lowest_dpi:
                 very_low.append(dpi)
             elif dpi < 0.98 * min_dpi:   # 2% leeway for rounding
                 low.append(dpi)
@@ -359,8 +398,8 @@ def _check_pdf(data, spec):
         checks.append(_check("Photo resolution", PASS, "No photos found (vector artwork prints sharp at any size)."))
     elif very_low:
         checks.append(_check("Photo resolution", FAIL,
-                             f"{len(very_low)} photo(s) are far too small for this size: the lowest is {worst:.0f}dpi "
-                             f"at full printed size (needs {min_dpi:.0f}dpi). They will print blurry.",
+                             f"{len(very_low)} photo(s) are too small for this size: the lowest is {worst:.0f}dpi "
+                             f"at full printed size (the lowest we can accept is {lowest_dpi:.0f}dpi; best is {min_dpi:.0f}dpi). They will print blurry.",
                              "Replace them with larger originals. Making a small image bigger in software doesn't add detail."))
     elif low:
         checks.append(_check("Photo resolution", WARN,
@@ -390,8 +429,9 @@ def _check_pdf(data, spec):
     else:
         checks.append(_check("Colour", PASS, "No RGB images found."))
     if spots:
-        checks.append(_check("Spot colours", INFO, "Spot colours used: " + ", ".join(sorted(spots))
-                             + ". Tell us if a colour must match exactly (e.g. a brand Pantone).", ""))
+        checks.append(_check("Spot colours", WARN, "Spot colours still in the file: " + ", ".join(sorted(spots))
+                             + ". They'll be converted to CMYK at print, which can give unreliable results.",
+                             "Convert all spot colours to CMYK. If a colour must match exactly, give your rep the Pantone (PMS) number."))
 
     # ---- safe zone
     if safe_req > 0:
@@ -421,8 +461,8 @@ def _check_pdf(data, spec):
 
 def _check_image(data, spec):
     checks, facts = [], {}
-    fw, fh = float(spec["width_mm"]), float(spec["height_mm"])
-    bleed_req, min_dpi = float(spec["bleed_mm"]), float(spec["min_dpi"])
+    fw, fh, (bl, br, bt, bb), _safe, min_dpi, lowest_dpi, adj = _norm_spec(spec)
+    bleed_any = max(bl, br, bt, bb) > 0
     try:
         im = Image.open(io.BytesIO(data))
         im.load()
@@ -431,31 +471,39 @@ def _check_image(data, spec):
                        "Send a PDF (best), or a JPG, PNG or TIFF.")], facts, None
     w, h = im.size
     facts.update(pixels=[w, h], mode=im.mode)
-    diff_trim, rot_trim = _aspect_status(w, h, fw, fh)
-    diff_bleed, rot_bleed = _aspect_status(w, h, fw + 2 * bleed_req, fh + 2 * bleed_req)
-    with_bleed = bleed_req > 0 and diff_bleed <= 0.01 and diff_bleed < diff_trim
-    total_w = fw + 2 * bleed_req if with_bleed else fw
-    if min(diff_trim, diff_bleed) <= 0.01:
-        checks.append(_check("Size and shape", PASS, f"Right shape for {_fmt_mm(fw, fh)}."))
-    elif min(rot_trim, rot_bleed) <= 0.01:
-        checks.append(_check("Size and shape", FAIL, f"The image is turned the other way to the product ({w} x {h} pixels for {_fmt_mm(fw, fh)}).",
-                             "Rotate it to match the product."))
+    dw, dh = fw + bl + br, fh + bt + bb          # document size with bleed
+    if adj:
+        # width is the customer's choice: judge by height only
+        with_bleed = bleed_any
+        px_per_mm = h / (dh if with_bleed else fh)
+        checks.append(_check("Size and shape", INFO, f"Width to suit; checked against {fh:.0f}mm high."))
     else:
-        checks.append(_check("Size and shape", FAIL if min(diff_trim, diff_bleed) > 0.05 else WARN,
-                             f"The image ({w} x {h} pixels) is a different shape from the product ({_fmt_mm(fw, fh)}), so it "
-                             "would be cropped or have gaps.",
-                             f"Crop or extend it to the product's shape, {fw:.0f}:{fh:.0f}."))
-    if bleed_req > 0:
-        if with_bleed:
-            checks.append(_check("Bleed", PASS, f"The pixels include {bleed_req:.0f}mm of bleed on every side."))
+        diff_trim, rot_trim = _aspect_status(w, h, fw, fh)
+        diff_bleed, rot_bleed = _aspect_status(w, h, dw, dh)
+        with_bleed = bleed_any and diff_bleed <= 0.01 and diff_bleed < diff_trim
+        px_per_mm = w / (dw if with_bleed else fw)
+        if min(diff_trim, diff_bleed) <= 0.01:
+            checks.append(_check("Size and shape", PASS, f"Right shape for {_fmt_mm(fw, fh)}."))
+        elif min(rot_trim, rot_bleed) <= 0.01:
+            checks.append(_check("Size and shape", FAIL, f"The image is turned the other way to the product ({w} x {h} pixels for {_fmt_mm(fw, fh)}).",
+                                 "Rotate it to match the product."))
         else:
-            checks.append(_check("Bleed", WARN, f"An image file has no separate bleed, and this one is the exact finished shape, "
-                                 f"so the outer {bleed_req:.0f}mm will be trimmed off.",
-                                 "Keep important content away from the edges, or send a PDF with bleed."))
-    dpi = w / (total_w / 25.4)
+            checks.append(_check("Size and shape", FAIL if min(diff_trim, diff_bleed) > 0.05 else WARN,
+                                 f"The image ({w} x {h} pixels) is a different shape from the product ({_fmt_mm(fw, fh)}), so it "
+                                 "would be cropped or have gaps.",
+                                 f"Make it {_fmt_mm(dw, dh)} including bleed (or that shape)."))
+    if bleed_any:
+        if with_bleed:
+            checks.append(_check("Bleed", PASS, "The image is the full size including bleed."))
+        else:
+            checks.append(_check("Bleed", WARN, "An image file has no separate bleed, and this one is the exact finished shape, "
+                                 "so its outer edges will be trimmed off.",
+                                 f"Make it {_fmt_mm(dw, dh)} including bleed, keep important content away from the edges, or send a PDF."))
+    dpi = px_per_mm * 25.4
     facts["dpi_at_full_size"] = round(dpi)
-    if dpi < 0.5 * min_dpi:
-        checks.append(_check("Resolution", FAIL, f"Only {dpi:.0f}dpi at full printed size (needs {min_dpi:.0f}dpi). It will print blurry.",
+    if dpi < 0.98 * lowest_dpi:
+        checks.append(_check("Resolution", FAIL, f"Only {dpi:.0f}dpi at full printed size (the lowest we can accept is "
+                             f"{lowest_dpi:.0f}dpi; best is {min_dpi:.0f}dpi). It will print blurry.",
                              "Send a much larger original, or vector artwork (PDF, AI, EPS)."))
     elif dpi < 0.98 * min_dpi:   # 2% leeway for rounding
         checks.append(_check("Resolution", WARN, f"{dpi:.0f}dpi at full printed size (aim for {min_dpi:.0f}dpi). Fine from a distance; soft close up.",

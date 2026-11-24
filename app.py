@@ -253,7 +253,7 @@ def load_specs():
         with open(SPECS_PATH, encoding="utf-8") as f:
             return _json.load(f)
     except (OSError, ValueError):
-        return {"confirmed": False, "defaults": {"bleed_mm": 10, "safe_mm": 50, "min_dpi": 100}, "products": []}
+        return {"confirmed": False, "defaults": {"bleed_mm": 10, "safe_mm": 0, "min_dpi": 150, "lowest_dpi": 75}, "products": []}
 
 
 def check_in_subprocess(file_bytes, filename, spec, timeout=150):
@@ -287,10 +287,14 @@ def spec_from_form(form, specs):
             return v if v >= 0 else default
         except ValueError:
             return default
-    spec = {"width_mm": num("width_mm", 0), "height_mm": num("height_mm", 0),
-            "bleed_mm": num("bleed_mm", d.get("bleed_mm", 10)), "safe_mm": num("safe_mm", d.get("safe_mm", 50)),
-            "min_dpi": num("min_dpi", d.get("min_dpi", 100))}
-    if spec["width_mm"] <= 0 or spec["height_mm"] <= 0:
+    b = d.get("bleed_mm", 10)
+    adj = form.get("width_adjustable") in ("on", "true", "1")
+    spec = {"width_mm": num("width_mm", 0), "height_mm": num("height_mm", 0), "width_adjustable": adj,
+            "bleed_left_mm": num("bleed_left_mm", b), "bleed_right_mm": num("bleed_right_mm", b),
+            "bleed_top_mm": num("bleed_top_mm", b), "bleed_bottom_mm": num("bleed_bottom_mm", b),
+            "safe_mm": num("safe_mm", d.get("safe_mm", 0)),
+            "min_dpi": num("min_dpi", d.get("min_dpi", 150)), "lowest_dpi": num("lowest_dpi", d.get("lowest_dpi", 75))}
+    if spec["height_mm"] <= 0 or (spec["width_mm"] <= 0 and not adj):
         return None
     return spec
 
@@ -302,6 +306,7 @@ CHECK_PAGE = """
 body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 16px;color:#222}
 h1{font-size:1.3rem} .nav{font-size:0.95rem;color:#555}
 label{display:block;margin-top:12px;font-weight:600}
+label.inline{font-weight:400}
 select,input{padding:8px;margin-top:4px;font-size:1rem}
 select{width:100%;max-width:420px}
 .row{display:flex;gap:12px;flex-wrap:wrap} .row label{flex:1;min-width:120px} .row input{width:100%;box-sizing:border-box}
@@ -333,13 +338,19 @@ You'll get a plain-English list of anything that needs fixing.</p>
     <input type="hidden" name="product" id="productField" value="{{ form.get('product','') }}">
   </label>
   <div class="row">
-    <label>Finished width (mm)<input name="width_mm" id="width_mm" inputmode="decimal" required value="{{ form.get('width_mm','') }}"></label>
-    <label>Finished height (mm)<input name="height_mm" id="height_mm" inputmode="decimal" required value="{{ form.get('height_mm','') }}"></label>
+    <label>Finished width (mm, trim)<input name="width_mm" id="width_mm" inputmode="decimal" value="{{ form.get('width_mm','') }}"></label>
+    <label>Finished height (mm, trim)<input name="height_mm" id="height_mm" inputmode="decimal" required value="{{ form.get('height_mm','') }}"></label>
+  </div>
+  <label class="inline"><input type="checkbox" name="width_adjustable" id="width_adjustable" {% if form.get('width_adjustable') %}checked{% endif %}> Width to suit (only the height is fixed)</label>
+  <div class="row">
+    {% for side in ['left','right','top','bottom'] %}
+    <label>Bleed {{ side }} (mm)<input name="bleed_{{side}}_mm" id="bleed_{{side}}_mm" inputmode="decimal" value="{{ form.get('bleed_'~side~'_mm', defaults.bleed_mm) }}"></label>
+    {% endfor %}
   </div>
   <div class="row">
-    <label>Bleed (mm)<input name="bleed_mm" id="bleed_mm" inputmode="decimal" value="{{ form.get('bleed_mm', defaults.bleed_mm) }}"></label>
     <label>Safe zone (mm)<input name="safe_mm" id="safe_mm" inputmode="decimal" value="{{ form.get('safe_mm', defaults.safe_mm) }}"></label>
-    <label>Lowest photo resolution (dpi at full size)<input name="min_dpi" id="min_dpi" inputmode="decimal" value="{{ form.get('min_dpi', defaults.min_dpi) }}"></label>
+    <label>Best photo resolution (ppi at full size)<input name="min_dpi" id="min_dpi" inputmode="decimal" value="{{ form.get('min_dpi', defaults.min_dpi) }}"></label>
+    <label>Lowest acceptable (ppi)<input name="lowest_dpi" id="lowest_dpi" inputmode="decimal" value="{{ form.get('lowest_dpi', defaults.lowest_dpi) }}"></label>
   </div>
   <label>Print file<input type="file" name="art" required accept=".pdf,image/*"></label>
   <button type="submit">Check artwork</button>
@@ -374,8 +385,14 @@ sel.addEventListener('change', () => {
   document.getElementById('productField').value = sel.value;
   const p = products[sel.value];
   if (!p) return;
-  for (const k of ['width_mm','height_mm','bleed_mm','safe_mm','min_dpi'])
-    if (p[k] !== undefined) document.getElementById(k).value = p[k];
+  for (const k of ['width_mm','height_mm','safe_mm','min_dpi','lowest_dpi'])
+    if (p[k] !== undefined && p[k] !== null) document.getElementById(k).value = p[k];
+  for (const side of ['left','right','top','bottom']){
+    const v = p['bleed_'+side+'_mm'] ?? p.bleed_mm;
+    if (v !== undefined && v !== null) document.getElementById('bleed_'+side+'_mm').value = v;
+  }
+  document.getElementById('width_adjustable').checked = !!p.width_adjustable;
+  if (p.width_adjustable) document.getElementById('width_mm').value = 0;
 });
 </script>
 </body></html>

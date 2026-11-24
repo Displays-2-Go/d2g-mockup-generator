@@ -119,3 +119,39 @@ def test_image_files():
     small = check_artwork(_img((425, 1000)), "a.png", SPEC)
     assert status(small, "Resolution") == "fail" and status(small, "Bleed") == "warn"
     assert status(small, "Colour") == "warn"
+
+
+# ---- per-side bleed, adjustable width, two resolution levels (from D2G's guides)
+PREMIER_500 = {"width_mm": 490, "height_mm": 1390, "bleed_left_mm": 5, "bleed_right_mm": 5,
+               "bleed_top_mm": 15, "bleed_bottom_mm": 30, "safe_mm": 0, "min_dpi": 150}
+
+
+def test_asymmetric_bleed_inferred_from_document_size():
+    r = check_artwork(pdf(500, 1435), "a.pdf", PREMIER_500)   # finished doc size incl. bleed
+    assert status(r, "Size and shape") == "pass", r["checks"]
+    assert status(r, "Bleed") == "pass"
+    assert r["facts"]["bleed_mm"] == {"left": 5, "right": 5, "top": 15, "bottom": 30}
+
+
+def test_asymmetric_bleed_short_at_bottom_via_trim_box():
+    # 10mm bleed all round in the file: bottom needs 30, top needs 15 -> not enough
+    r = check_artwork(pdf(510, 1410, trim=(10, 10, 500, 1400)), "a.pdf", PREMIER_500)
+    assert status(r, "Size and shape") == "pass"
+    b = next(c for c in r["checks"] if c["name"] == "Bleed")
+    assert b["status"] == "warn" and "bottom has 10mm (needs 30mm)" in b["detail"] and "top" in b["detail"]
+
+
+def test_width_to_suit_checks_height_only():
+    spec = {"width_mm": 0, "height_mm": 1390, "width_adjustable": True, "bleed_left_mm": 10,
+            "bleed_right_mm": 10, "bleed_top_mm": 15, "bleed_bottom_mm": 30, "min_dpi": 75}
+    r = check_artwork(pdf(3020, 1435), "a.pdf", spec)          # any width, 1435 high incl. bleed
+    assert status(r, "Size and shape") == "pass" and status(r, "Bleed") == "pass"
+    assert status(check_artwork(pdf(3020, 1200), "a.pdf", spec), "Size and shape") == "fail"
+
+
+def test_two_resolution_levels():
+    # 490mm trim + 10mm bleed = 500mm page; 2000px over 500mm = ~102dpi: between 75 and 150 -> warn
+    mid = check_artwork(pdf(500, 1435, img_px=(2000, 5740)), "a.pdf", PREMIER_500)
+    assert status(mid, "Photo resolution") == "warn"
+    low = check_artwork(pdf(500, 1435, img_px=(1000, 2870)), "a.pdf", PREMIER_500)   # ~51dpi < 75
+    assert status(low, "Photo resolution") == "fail"
