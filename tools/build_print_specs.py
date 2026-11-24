@@ -147,6 +147,24 @@ def main():
         for c in row:
             c.alignment = Alignment(wrap_text=True, vertical="top")
     ws.freeze_panes = "C2"; ws.auto_filter.ref = ws.dimensions
+    # every problem / unreadable file the readers reported, for fixing the guides themselves
+    ws2 = wb.create_sheet("Guide problems")
+    ws2.append(["Folder group", "Kind", "Detail"])
+    for f in sys.argv[2:]:
+        for r in json.loads(Path(f).read_text(encoding="utf-8")):
+            if isinstance(r, dict) and "_summary" in r:
+                sm = r["_summary"]
+                grp = ", ".join(str(x) for x in (sm.get("folders_read") or [])[:4])
+                for kind, key in (("Problem in a guide", "problems"), ("Template not read (.ai/.psd, or no text)", "templates_not_read")):
+                    for p in sm.get(key) or []:
+                        ws2.append([grp, kind, p if isinstance(p, str) else json.dumps(p)])
+    ws2.column_dimensions["A"].width = 40; ws2.column_dimensions["B"].width = 30; ws2.column_dimensions["C"].width = 120
+    for c in ws2[1]:
+        c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="2F4F6F")
+    for row in ws2.iter_rows():
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    ws2.freeze_panes = "A2"
     wb.save(out / "Artwork specs review.xlsx")
     print(f"{len(review)} guide records -> {len(products)} products in the checker; "
           f"{sum(1 for r in review if r['In checker'].startswith('Held'))} held back (guide doesn't add up), "

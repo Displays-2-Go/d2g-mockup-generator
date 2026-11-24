@@ -328,12 +328,17 @@ button{margin-top:20px;padding:10px 20px;font-size:1rem;cursor:pointer;border:1p
 <h1>Is this artwork ready to print?</h1>
 <p>Upload the print file (PDF is best; JPG, PNG and TIFF also work) and choose the product or enter its finished size.
 You'll get a plain-English list of anything that needs fixing.</p>
-{% if not confirmed %}<p class="note">Draft settings: the bleed, safe zone and resolution rules below have not yet been confirmed by D2G.</p>{% endif %}
+{% if not confirmed %}<p class="note">Product sizes come from D2G's artwork guides and are awaiting a final check by D2G.</p>{% endif %}
 <form method="post" action="/check" enctype="multipart/form-data">
   <label>Product
     <select id="product">
       <option value="">Custom size (enter below)</option>
-      {% for p in products %}<option value="{{ loop.index0 }}" {% if form.get('product') == loop.index0|string %}selected{% endif %}>{{ p.name }}</option>{% endfor %}
+      {% set ns = namespace(r=None) %}
+      {% for p in products %}
+        {% if p.range != ns.r %}{% if ns.r is not none %}</optgroup>{% endif %}<optgroup label="{{ p.range or 'Other' }}">{% set ns.r = p.range %}{% endif %}
+        <option value="{{ loop.index0 }}" {% if form.get('product') == loop.index0|string %}selected{% endif %}>{{ p.name }}</option>
+      {% endfor %}
+      {% if ns.r is not none %}</optgroup>{% endif %}
     </select>
     <input type="hidden" name="product" id="productField" value="{{ form.get('product','') }}">
   </label>
