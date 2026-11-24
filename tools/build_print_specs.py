@@ -48,12 +48,22 @@ def build(records):
             tw = dw - sides["left"] - sides["right"]; flags.append("trim width worked out from document size")
         if th is None and dh is not None and sides["top"] is not None and sides["bottom"] is not None:
             th = dh - sides["top"] - sides["bottom"]; flags.append("trim height worked out from document size")
+        # a missing bleed is implied by the document size when the guide gives one
+        # (e.g. Big Mural: document 100mm wider than trim -> 50mm each side)
+        if dw is not None and tw is not None and not adj and sides["left"] is None and sides["right"] is None:
+            sides["left"] = sides["right"] = round((dw - tw) / 2, 1)
+            flags.append("left/right bleed worked out from document size")
+        if dh is not None and th is not None and sides["top"] is None and sides["bottom"] is None:
+            sides["top"] = sides["bottom"] = round((dh - th) / 2, 1)
+            flags.append("top/bottom bleed worked out from document size")
         if all(v is None for v in sides.values()):
             sides = {k: DEFAULT_BLEED for k in sides}; flags.append("no bleed in guide: company default 10mm used")
         else:
             for k, v in sides.items():
                 if v is None:
                     sides[k] = DEFAULT_BLEED; flags.append(f"{k} bleed not stated: 10mm used")
+        if any(v < 0 for v in sides.values()):
+            flags.append("CHECK: document is smaller than the trim")
         # consistency check: trim + bleed should equal the stated document size
         if dw and tw and not adj and abs(tw + sides["left"] + sides["right"] - dw) > 1:
             flags.append(f"CHECK: trim {tw:.0f} + bleed {sides['left']+sides['right']:.0f} != document width {dw:.0f}")
@@ -64,7 +74,9 @@ def build(records):
         lowest = min(LOWEST_PPI, ppi) if ppi else LOWEST_PPI
         usable = th is not None and (tw is not None or adj) and (tw or 0) >= 0
         if (r.get("confidence") or "").lower() == "low":
-            flags.append("low confidence reading")
+            # D2G writes sizes width first, so an unlabelled "A x B" is read as
+            # width A, height B; still worth a glance in the review sheet
+            flags.append("read with less certainty (width-first rule applied) - please glance at it")
         row = {"Range": r.get("product_range"), "Product": name, "Trim width mm": tw if not adj else "to suit",
                "Trim height mm": th, "Bleed L": sides["left"], "Bleed R": sides["right"], "Bleed T": sides["top"],
                "Bleed B": sides["bottom"], "Document w x h (guide)": f"{dw or ''} x {dh or ''}".strip(" x"),
@@ -74,6 +86,11 @@ def build(records):
                "Source file": r.get("source_file"), "Folder": r.get("source_path")}
         review.append(row)
         if not usable:
+            continue
+        if any(f.startswith("CHECK") for f in flags):
+            # the guide contradicts itself: the checker could fail correct artwork,
+            # so hold it back until someone fixes the guide or confirms the numbers
+            row["In checker"] = "Held back - guide's numbers don't add up"
             continue
         key = (name.lower(), tw, th, tuple(sides.values()))
         if key in seen:
@@ -132,7 +149,8 @@ def main():
     ws.freeze_panes = "C2"; ws.auto_filter.ref = ws.dimensions
     wb.save(out / "Artwork specs review.xlsx")
     print(f"{len(review)} guide records -> {len(products)} products in the checker; "
-          f"{sum(1 for r in review if r['Flags'].startswith('CHECK') or 'CHECK' in r['Flags'])} need checking")
+          f"{sum(1 for r in review if r['In checker'].startswith('Held'))} held back (guide doesn't add up), "
+          f"{sum(1 for r in review if r['In checker'].startswith('No'))} missing a size")
 
 
 if __name__ == "__main__":
